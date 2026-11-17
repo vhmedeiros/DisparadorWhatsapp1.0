@@ -216,8 +216,8 @@ async function startSession(sessionId) {
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
     // --- Versão do protocolo obtida dinamicamente do GitHub (fallback automático se offline) ---
-    const { version, isLatest } = await fetchLatestBaileysVersion({ timeout: 10000 });
-    console.log(`[${sessionId}] Versão WA: ${version.join('.')} (atualizada do GitHub: ${isLatest})`);
+    const { version, isLatest, error: versionError } = await fetchLatestBaileysVersion({ timeout: 10000 });
+    console.log(`[${sessionId}] Versão WA: ${version.join('.')} (atualizada do GitHub: ${isLatest})${versionError ? ` [FALHA ao buscar no GitHub: ${versionError.message}]` : ''}`);
 
     const conn = makeWASocket({
         version,
@@ -250,7 +250,13 @@ async function startSession(sessionId) {
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             
             sessions[sessionId].state = shouldReconnect ? 'closed' : 'loggedOut';
-            console.log(`[${sessionId}] Conexão fechada. Motivo: ${statusCode}. Reconectar? ${shouldReconnect}`);
+            const detalhe = lastDisconnect?.error?.message || 'sem mensagem';
+            console.log(`[${sessionId}] Conexão fechada. Motivo: ${statusCode}. Reconectar? ${shouldReconnect}. Detalhe: ${detalhe}`);
+            if (lastDisconnect?.error) {
+                const errOut = lastDisconnect.error.output;
+                if (errOut) console.log(`[${sessionId}] Disconnect output: ${JSON.stringify(errOut).slice(0, 500)}`);
+                if (lastDisconnect.error.stack) console.log(`[${sessionId}] Disconnect stack: ${String(lastDisconnect.error.stack).split('\n').slice(0, 6).join(' | ')}`);
+            }
             
             if (shouldReconnect) {
                 const attempts = (sessions[sessionId].reconnectAttempts || 0) + 1;
@@ -416,10 +422,15 @@ app.post('/session/state', (req, res) => {
 // Isso torna o reinício do PC/serviço transparente para o agendador.
 function discoverSavedSessions() {
     try {
-        return fs
+        const dirs = fs
             .readdirSync(__dirname, { withFileTypes: true })
-            .filter((entry) => entry.isDirectory() && entry.name.startsWith('auth_info_'))
-            .map((entry) => entry.name.slice('auth_info_'.length))
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name);
+        const candidates = dirs.filter((name) => name.startsWith('auth_info_'));
+        console.log(`[BOOT] Diretório do projeto: ${__dirname}`);
+        console.log(`[BOOT] Pastas auth_info_* encontradas: ${candidates.join(', ') || 'nenhuma'}`);
+        return candidates
+            .map((name) => name.slice('auth_info_'.length))
             .filter((sessionId) => sessionId && fs.existsSync(path.join(__dirname, `auth_info_${sessionId}`, 'creds.json')));
     } catch (e) {
         console.error(`[BOOT] Falha ao procurar sessões salvas: ${e.message}`);
