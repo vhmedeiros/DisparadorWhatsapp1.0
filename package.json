@@ -7,10 +7,11 @@
     "start": "node server_baileys_pro.mjs"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.20",
+    "@whiskeysockets/baileys": "6.7.24",
     "async": "^3.2.6",
     "body-parser": "^1.20.2",
     "express": "^5.1.0",
-    "pino": "^10.0.0"
+    "pino": "^10.0.0",
+    "pino-roll": "^4.0.0"
   }
 }

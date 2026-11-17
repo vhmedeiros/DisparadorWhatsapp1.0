@@ -1,13 +1,14 @@
 import makeWASocket, { 
     useMultiFileAuthState, 
     DisconnectReason,
-    // fetchLatestBaileysVersion <-- REMOVIDO
+    fetchLatestBaileysVersion,
 } from '@whiskeysockets/baileys'; 
 import express from 'express';
 import bodyParser from 'body-parser';
 import async from 'async'; 
 import path from 'path';
 import fs from 'fs';
+import util from 'util';
 import pino from 'pino';
 
 // --- Variáveis de Caminho para Módulos ES (.mjs) ---
@@ -16,6 +17,51 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // --------------------------------------------------------
 
+// --- Configurações de Alerta ---
+// O usuário não usa variáveis de ambiente; os valores padrão são usados como fallback.
+const ADMIN_SESSION_ID = process.env.ADMIN_SESSION_ID || 'WhatsAdmin';
+const ALERT_TARGET_JID = process.env.ALERT_TARGET_JID || '5561998883036@s.whatsapp.net';
+
+// --- Rotação de Logs (pino-roll: rotação diária, mantendo os últimos 7 arquivos) ---
+const logStream = pino.transport({
+    target: 'pino-roll',
+    options: {
+        file: path.join(__dirname, 'logs', 'app'),
+        frequency: 'daily',
+        mkdir: true,
+        limit: { count: 7 },
+        extension: '.log',
+    },
+});
+
+// Espelha tudo que seria impresso no console para o arquivo de log rotacionado.
+const originalLog = console.log.bind(console);
+const originalInfo = console.info.bind(console);
+const originalWarn = console.warn.bind(console);
+const originalError = console.error.bind(console);
+
+function formatLogArgs(args) {
+    return args
+        .map((a) => (typeof a === 'string' ? a : util.inspect(a, { depth: 4, breakLength: Infinity })))
+        .join(' ');
+}
+
+function teeToLogFile(level, original, args) {
+    const line = `[${new Date().toISOString()}] [${level}] ${formatLogArgs(args)}`;
+    original(...args);
+    try {
+        logStream.write(line + '\n');
+    } catch (e) {
+        original(`[LOGGER] Falha ao escrever no arquivo de log: ${e.message}`);
+    }
+}
+
+console.log = (...args) => teeToLogFile('LOG', originalLog, args);
+console.info = (...args) => teeToLogFile('INFO', originalInfo, args);
+console.warn = (...args) => teeToLogFile('WARN', originalWarn, args);
+console.error = (...args) => teeToLogFile('ERROR', originalError, args);
+
+// Logger interno do Baileys (silencioso para não poluir o log da aplicação).
 const logger = pino({ level: 'silent' });
 const app = express();
 const port = 3000;
@@ -26,6 +72,15 @@ app.use(bodyParser.json());
 
 const sessions = {};
 const groupJidsCache = {}; 
+
+// --- Backoff Exponencial com Jitter (evita "reconnect storm") ---
+function getReconnectDelay(attempt) {
+    // 5s → 10s → 20s → 40s → ... até o teto de 5 minutos
+    const base = Math.min(5000 * Math.pow(2, attempt - 1), 300000);
+    // Jitter de ±20% para que as sessões não reconectem todas no mesmo instante
+    const jitter = base * 0.2 * (Math.random() * 2 - 1);
+    return Math.round(base + jitter);
+}
 
 // --- Fila de mensagens (inalterado) ---
 const sendQueue = async.queue(async (task) => {
@@ -102,22 +157,27 @@ async function syncGroups(sessionId, conn) {
     }
 }
 
-// --- FUNÇÃO PARA INICIAR UMA SESSÃO (MODIFICADA) ---
+// --- FUNÇÃO PARA INICIAR UMA SESSÃO ---
 async function startSession(sessionId) {
     const authDir = path.join(__dirname, `auth_info_${sessionId}`);
-    
+
+    // --- Limpa a conexão anterior (evita vazamento de listeners ao reconectar) ---
+    const existingSession = sessions[sessionId];
+    const previousAttempts = existingSession?.reconnectAttempts || 0;
+    if (existingSession?.conn?.ev) {
+        try {
+            existingSession.conn.ev.removeAllListeners();
+        } catch (e) { /* ignora */ }
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
-    
-    // --- INÍCIO DA MODIFICAÇÃO ---
-    // Removido: const { version } = await fetchLatestBaileysVersion()
-    // Adicionada uma versão fixa para evitar consulta à internet:
-    // const version = [6, 7, 1]; // Usando uma versão estável e recente
-    const version = [2, 3000, 1043857760]; // Usando uma versão estável e recente
-    console.log(`[${sessionId}] Iniciando sessão com versão fixa: ${version.join('.')}`);
-    // --- FIM DA MODIFICAÇÃO ---
+
+    // --- Versão do protocolo obtida dinamicamente do GitHub (fallback automático se offline) ---
+    const { version, isLatest } = await fetchLatestBaileysVersion({ timeout: 10000 });
+    console.log(`[${sessionId}] Versão WA: ${version.join('.')} (atualizada do GitHub: ${isLatest})`);
 
     const conn = makeWASocket({
-        version, // <--- Usa a versão fixa
+        version,
         auth: state,
         printQRInTerminal: false,
         logger: logger,
@@ -128,10 +188,11 @@ async function startSession(sessionId) {
     sessions[sessionId] = { 
         conn, 
         state: 'connecting', 
-        qrCode: null 
+        qrCode: null,
+        reconnectAttempts: previousAttempts,
     };
     
-    // 4. Lógica de eventos (inalterado)
+    // 4. Lógica de eventos
     conn.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
@@ -142,15 +203,18 @@ async function startSession(sessionId) {
         }
         
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            const reason = lastDisconnect.error?.output?.statusCode;
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             
             sessions[sessionId].state = shouldReconnect ? 'closed' : 'loggedOut';
-            console.log(`[${sessionId}] Conexão fechada. Motivo: ${reason}. Reconectar? ${shouldReconnect}`);
+            console.log(`[${sessionId}] Conexão fechada. Motivo: ${statusCode}. Reconectar? ${shouldReconnect}`);
             
             if (shouldReconnect) {
-                console.log(`[${sessionId}] Tentando reconexão...`);
-                setTimeout(() => startSession(sessionId), 5000); 
+                const attempts = (sessions[sessionId].reconnectAttempts || 0) + 1;
+                sessions[sessionId].reconnectAttempts = attempts;
+                const delay = getReconnectDelay(attempts);
+                console.log(`[${sessionId}] Reconexão tentativa #${attempts} em ${(delay / 1000).toFixed(1)}s...`);
+                setTimeout(() => startSession(sessionId), delay);
             } else {
                 console.log(`[${sessionId}] Desconexão permanente detectada. Disparando alerta...`);
                 sendConnectionAlert(sessionId); 
@@ -158,6 +222,7 @@ async function startSession(sessionId) {
             
         } else if (connection === 'open') {
             sessions[sessionId].state = 'open';
+            sessions[sessionId].reconnectAttempts = 0;
             console.log(`[${sessionId}] Conectado com sucesso!`);
             syncGroups(sessionId, conn);
         }
