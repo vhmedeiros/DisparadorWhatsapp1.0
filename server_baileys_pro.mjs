@@ -46,14 +46,49 @@ function formatLogArgs(args) {
         .join(' ');
 }
 
-function teeToLogFile(level, original, args) {
-    const line = `[${new Date().toISOString()}] [${level}] ${formatLogArgs(args)}`;
-    original(...args);
+// --- Filtro de ruído do libsignal ("Bad MAC") ---
+// Essas mensagens vêm direto do console.error do libsignal (recebimento de mensagens
+// que não puderam ser decriptadas). Não afetam o ENVIO, mas inundam o log.
+// Estratégia: registra a 1ª ocorrência e, depois, no máximo 1 resumo por minuto.
+const badMacState = { lastLog: 0, suppressed: 0 };
+
+function classifyBadMac(text) {
+    if (text.includes('Failed to decrypt message with any known session')) return 'start';
+    if (text.includes('Bad MAC')) return 'cont';
+    return null;
+}
+
+function writeLogLine(level, text, args, original) {
+    const line = `[${new Date().toISOString()}] [${level}] ${text}`;
+    if (original) original(...args);
     try {
         logStream.write(line + '\n');
     } catch (e) {
-        original(`[LOGGER] Falha ao escrever no arquivo de log: ${e.message}`);
+        originalLog(`[LOGGER] Falha ao escrever no arquivo de log: ${e.message}`);
     }
+}
+
+function teeToLogFile(level, original, args) {
+    const text = formatLogArgs(args);
+    const kind = classifyBadMac(text);
+
+    if (kind) {
+        if (kind === 'cont') return; // continuação (stack) do Bad MAC: sempre ignorada
+        const now = Date.now();
+        if (now - badMacState.lastLog >= 60000) {
+            const suffix = badMacState.suppressed > 0
+                ? ` [${badMacState.suppressed} ocorrências de "Bad MAC" suprimidas no último minuto]`
+                : '';
+            badMacState.lastLog = now;
+            badMacState.suppressed = 0;
+            writeLogLine(level, text + suffix, args, original);
+        } else {
+            badMacState.suppressed++;
+        }
+        return;
+    }
+
+    writeLogLine(level, text, args, original);
 }
 
 console.log = (...args) => teeToLogFile('LOG', originalLog, args);
