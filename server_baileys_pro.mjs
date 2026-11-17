@@ -410,6 +410,43 @@ app.post('/session/state', (req, res) => {
 });
 
 
+// --- AUTO-START NO BOOT ---
+// Ao iniciar o backend, procura por sessões já pareadas (pastas auth_info_* com creds.json)
+// e reconecta cada uma automaticamente, sem precisar de QR nem de ação manual.
+// Isso torna o reinício do PC/serviço transparente para o agendador.
+function discoverSavedSessions() {
+    try {
+        return fs
+            .readdirSync(__dirname, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && entry.name.startsWith('auth_info_'))
+            .map((entry) => entry.name.slice('auth_info_'.length))
+            .filter((sessionId) => sessionId && fs.existsSync(path.join(__dirname, `auth_info_${sessionId}`, 'creds.json')));
+    } catch (e) {
+        console.error(`[BOOT] Falha ao procurar sessões salvas: ${e.message}`);
+        return [];
+    }
+}
+
+function autoStartSavedSessions() {
+    const sessionIds = discoverSavedSessions();
+    if (!sessionIds.length) {
+        console.log('[BOOT] Nenhuma sessão salva (auth_info_* com creds.json) encontrada.');
+        return;
+    }
+    console.log(`[BOOT] Sessões salvas encontradas: ${sessionIds.join(', ')}. Iniciando reconexão automática...`);
+    sessionIds.forEach((sessionId, index) => {
+        if (sessions[sessionId]) return;
+        // Escalona as conexões (3s entre cada) para não disparar todos os handshakes ao mesmo tempo.
+        setTimeout(() => {
+            console.log(`[BOOT] Iniciando sessão salva "${sessionId}"...`);
+            startSession(sessionId).catch((e) => {
+                console.error(`[${sessionId}] Falha ao iniciar sessão no boot: ${e.message}`);
+            });
+        }, index * 3000);
+    });
+}
+
 app.listen(port, () => {
     console.log(`Servidor Node.js PRO (Baileys) rodando em http://localhost:${port}`);
+    autoStartSavedSessions();
 });
