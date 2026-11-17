@@ -1,0 +1,16 @@
+{
+  "name": "disparadorwhatsapp",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server_baileys_pro.mjs",
+  "scripts": {
+    "start": "node server_baileys_pro.mjs"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.20",
+    "async": "^3.2.6",
+    "body-parser": "^1.20.2",
+    "express": "^5.1.0",
+    "pino": "^10.0.0"
+  }
+}
