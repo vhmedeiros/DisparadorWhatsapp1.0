@@ -137,7 +137,12 @@ foi desconectada permanentemente (Status: Logged Out).
     }
 }
 
-// --- Função Sincronizar Grupos (inalterado) ---
+// --- Função Sincronizar Grupos ---
+// Normaliza o nome do grupo (remove espaços nas pontas) para o cache ficar consistente.
+function normalizeGroupName(name) {
+    return String(name || '').trim().toLowerCase();
+}
+
 async function syncGroups(sessionId, conn) {
     console.log(`[${sessionId}] Iniciando sincronização de grupos...`);
     try {
@@ -146,8 +151,11 @@ async function syncGroups(sessionId, conn) {
         for (const [jid, metadata] of Object.entries(groups)) {
             const groupName = metadata.subject;
             if (groupName) {
-                groupJidsCache[groupName.toLowerCase()] = jid;
-                count++;
+                const key = normalizeGroupName(groupName);
+                if (key) {
+                    groupJidsCache[key] = jid;
+                    count++;
+                }
             }
         }
         console.log(`[${sessionId}] Sincronização de grupos concluída: ${count} grupos encontrados e em cache.`);
@@ -228,7 +236,7 @@ async function startSession(sessionId) {
         }
     });
 
-    // LISTENER DE JID (inalterado)
+    // LISTENER DE JID
     conn.ev.on('messages.upsert', async ({ messages }) => {
         if (!messages.length) return;
         const message = messages[0];
@@ -238,8 +246,9 @@ async function startSession(sessionId) {
         try {
             const metadata = await conn.groupMetadata(jid);
             const groupName = metadata.subject;
-            if (groupName && !groupJidsCache[groupName.toLowerCase()]) {
-                groupJidsCache[groupName.toLowerCase()] = jid;
+            const key = normalizeGroupName(groupName);
+            if (key && !groupJidsCache[key]) {
+                groupJidsCache[key] = jid;
                 console.log(`[${sessionId}] JID de grupo capturado (Mensagem): "${groupName}" -> ${jid}`);
             }
         } catch (e) {
@@ -312,12 +321,12 @@ app.post('/send_message', async (req, res) => {
     const isJidFormat = rawJid.includes('@');
 
     if (!isJidFormat) {
-        const cachedJid = groupJidsCache[rawJid.toLowerCase()];
+        const cachedJid = groupJidsCache[normalizeGroupName(rawJid)];
         if (cachedJid) {
             jidToSend = cachedJid;
             console.log(`[${sessionId}] Usando JID numérico em cache: ${jidToSend}`);
         } else {
-            jidToSend = `${rawJid.toLowerCase().replace(/ /g, '_')}@g.us`;
+            jidToSend = `${normalizeGroupName(rawJid).replace(/ /g, '_')}@g.us`;
             console.warn(`[${sessionId}] JID "${rawJid}" não encontrado no cache. Tentando JID formatado: ${jidToSend}`);
         }
     }
