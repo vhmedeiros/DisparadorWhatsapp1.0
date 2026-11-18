@@ -9,7 +9,18 @@ import async from 'async';
 import path from 'path';
 import fs from 'fs';
 import util from 'util';
+import dns from 'dns';
+import net from 'net';
 import pino from 'pino';
+
+// --- Ajuste de rede (servidor sem rota IPv6 + path MTU reduzida) ---
+// O "Happy Eyeballs" (autoSelectFamily) do Node tenta IPv6, não há rota (ENETUNREACH),
+// e o handshake TLS do WebSocket do WhatsApp trava -> erro 408. Forçamos IPv4 primeiro
+// e desligamos o autoSelectFamily. Se algum dia houver IPv6 funcional, é só remover isto.
+dns.setDefaultResultOrder('ipv4first');
+if (typeof net.setDefaultAutoSelectFamily === 'function') {
+    net.setDefaultAutoSelectFamily(false);
+}
 
 // --- Variáveis de Caminho para Módulos ES (.mjs) ---
 import { fileURLToPath } from 'url';
